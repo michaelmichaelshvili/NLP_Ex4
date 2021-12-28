@@ -13,14 +13,12 @@ from torchtext import data
 import torch.optim as optim
 from math import log, isfinite
 from collections import Counter
-# import numpy as np
+import numpy as np
 import sys, os, time, platform, nltk, random
 
 # With this line you don't need to worry about the HW  -- GPU or CPU
 # GPU cuda cores will be used if available
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(torch.rand(5, 3))
-x = 0
 
 # You can call use_seed with other seeds or None (for complete randomization)
 # but DO NOT change the default value.
@@ -38,7 +36,7 @@ def who_am_i():  # this is not a class method
         Make sure you return your own info!
     """
     # TODO edit the dictionary to have your own details
-    return {'name': 'John Doe', 'id': '012345678', 'email': 'jdoe@post.bgu.ac.il'}
+    return {'name': 'Michael Michaelshvili', 'id': '318949443', 'email': 'michmich@post.bgu.ac.il'}
 
 
 def read_annotated_sentence(f):
@@ -79,6 +77,21 @@ A = {}  # transisions probabilities
 B = {}  # emmissions probabilities
 
 
+def fill_count_dict(dict, k1, k2):
+    if k1 not in dict:
+        dict[k1] = Counter({k2: 1})
+    else:
+        dict[k1][k2] += 1
+
+
+def get_distribution_probabilities(from_dict):
+    probs = {}
+    for k1 in from_dict:
+        sum_sounts = sum(from_dict[k1].values())
+        probs[k1] = {k2: log(c / sum_sounts) for k2, c in from_dict[k1].items()}
+    return probs
+
+
 def learn_params(tagged_sentences):
     """Populates and returns the allTagCounts, perWordTagCounts, transitionCounts,
     and emissionCounts data-structures.
@@ -96,7 +109,30 @@ def learn_params(tagged_sentences):
     Return:
     [allTagCounts,perWordTagCounts,transitionCounts,emissionCounts,A,B] (a list)
     """
-    # TODO complete the code
+    for sen in tagged_sentences:
+        prev_state = START
+        for word, tag in sen:
+            allTagCounts[tag] += 1
+            fill_count_dict(perWordTagCounts, word, tag)
+            fill_count_dict(transitionCounts, prev_state, tag)
+            fill_count_dict(emissionCounts, tag, word)
+            prev_state = tag
+        fill_count_dict(transitionCounts, prev_state, END)
+
+    # smoothing
+    for key1 in transitionCounts.keys():
+        c = transitionCounts[key1]
+        for key2 in list(allTagCounts.keys()) + [END]:
+            c[key2] += 1
+    del transitionCounts[START][END]
+    for key1 in emissionCounts.keys():
+        c = emissionCounts[key1]
+        for key2 in list(perWordTagCounts.keys()) + [UNK]:
+            c[key2] += 1
+
+    A = get_distribution_probabilities(transitionCounts)
+    B = get_distribution_probabilities(emissionCounts)
+
     return [allTagCounts, perWordTagCounts, transitionCounts, emissionCounts, A, B]
 
 
@@ -114,7 +150,13 @@ def baseline_tag_sentence(sentence, perWordTagCounts, allTagCounts):
         Return:
         list: list of pairs
     """
-    # TODO complete the code
+    tagged_sentence = []
+    for word in sentence:
+        if word in perWordTagCounts:
+            tagged_sentence.append((word, perWordTagCounts[word].most_common(1)[0][0]))
+        else:
+            sampled_tag = random.choices(list(allTagCounts.keys()), weights=list(allTagCounts.values()), k=1)
+            tagged_sentence.append((word, sampled_tag))
     return tagged_sentence
 
 
