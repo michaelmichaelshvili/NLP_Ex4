@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 from torchtext import data
 import torch.optim as optim
+import pandas as pd
 from math import log, isfinite
 from collections import Counter
 import numpy as np
@@ -19,6 +20,7 @@ import sys, os, time, platform, nltk, random
 # With this line you don't need to worry about the HW  -- GPU or CPU
 # GPU cuda cores will be used if available
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 
 # You can call use_seed with other seeds or None (for complete randomization)
 # but DO NOT change the default value.
@@ -179,7 +181,7 @@ def hmm_tag_sentence(sentence, A, B):
         list: list of pairs
     """
 
-    # TODO complete the code
+    tags = retrace(viterbi(sentence, A, B))
 
     return tagged_sentence
 
@@ -209,9 +211,25 @@ def viterbi(sentence, A, B):
     # Hint 2: start with a dummy item  with the START tag (what would it log-prob be?).
     #         current list = [ the dummy item ]
     # Hint 3: end the sequence with a dummy: the highest-scoring item with the tag END
+    sentence.insert(0, START)
+    viterbi = pd.DataFrame(0, index=list(allTagCounts.keys()), columns=[i for i in range(len(sentence))])
+    for t in A[START]:
+        viterbi.loc[t, 0] = A[START][t] + (B[t][sentence[0]] if sentence[0] in perWordTagCounts else B[t][UNK])
 
-    # TODO complete the code
-
+    for w in range(1, len(sentence)):  # loop through observations (words)
+        tags_to_iterate = list(perWordTagCounts[sentence[w]].keys()) if sentence[w] in perWordTagCounts else list(
+            allTagCounts.keys())
+        for t in tags_to_iterate:  # loop through the tags
+            best_tag, best_prob = predict_next_best(sentence, w, t, viterbi, A, B)
+            viterbi.loc[t, w] = best_prob
+    v_last = {'tag': END, 'p': None}
+    curr_v = v_last
+    for i in range(len(sentence)-1, -1, -1):
+        if i == 0: #START
+            curr_v['p'] = {'tag': START, 'p': None}
+        else:
+            curr_v['p'] = {'tag': viterbi.iloc[:, i][viterbi.iloc[:, i] < 0].idxmax(), 'p': None}
+            curr_v = curr_v['p']
     return v_last
 
 
@@ -224,9 +242,17 @@ def retrace(end_item):
 
 
 # a suggestion for a helper function. Not an API requirement
-def predict_next_best(word, tag, predecessor_list):
+def predict_next_best(sentence, word_idx, tag, viterbi, A, B):
     """Returns a new item (tupple)
     """
+    best_tag, best_prob = None, float('-inf')
+
+    for s in allTagCounts:
+        prob = viterbi.at[s, word_idx - 1] + A[s][tag] + B[tag][sentence[word_idx]]
+        if prob > best_prob:
+            best_prob = prob
+            best_tag = s
+    return best_tag, best_prob
 
 
 def joint_prob(sentence, A, B):
