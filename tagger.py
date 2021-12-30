@@ -182,7 +182,7 @@ def hmm_tag_sentence(sentence, A, B):
     """
 
     tags = retrace(viterbi(sentence, A, B))
-
+    tagged_sentence = list(zip(sentence, tags))
     return tagged_sentence
 
 
@@ -224,12 +224,13 @@ def viterbi(sentence, A, B):
             viterbi.loc[t, w] = best_prob
     v_last = {'tag': END, 'p': None}
     curr_v = v_last
-    for i in range(len(sentence)-1, -1, -1):
-        if i == 0: #START
+    for i in range(len(sentence) - 1, -1, -1):
+        if i == 0:  # START
             curr_v['p'] = {'tag': START, 'p': None}
         else:
             curr_v['p'] = {'tag': viterbi.iloc[:, i][viterbi.iloc[:, i] < 0].idxmax(), 'p': None}
             curr_v = curr_v['p']
+    sentence.pop(0)
     return v_last
 
 
@@ -239,6 +240,12 @@ def retrace(end_item):
         reversing it and returning the list). The list should correspond to the
         list of words in the sentence (same indices).
     """
+    tags = []
+    item = end_item['p']
+    while item['p']:
+        tags.append(item['tag'])
+        item = item['p']
+    return reversed(tags)
 
 
 # a suggestion for a helper function. Not an API requirement
@@ -248,7 +255,8 @@ def predict_next_best(sentence, word_idx, tag, viterbi, A, B):
     best_tag, best_prob = None, float('-inf')
 
     for s in allTagCounts:
-        prob = viterbi.at[s, word_idx - 1] + A[s][tag] + B[tag][sentence[word_idx]]
+        prob = viterbi.at[s, word_idx - 1] + A[s][tag] + (
+            B[tag][sentence[word_idx]] if sentence[word_idx] in B[tag] else B[tag][UNK])
         if prob > best_prob:
             best_prob = prob
             best_tag = s
@@ -266,7 +274,12 @@ def joint_prob(sentence, A, B):
      """
     p = 0  # joint log prob. of words and tags
 
-    # TODO complete the code
+    prev_tag = START
+    for word, tag in sentence:
+        p += A[prev_tag][tag] + (B[tag][word] if word in B[tag] else B[tag][UNK])
+        prev_tag = tag
+
+    p += A[prev_tag][END]
 
     assert isfinite(p) and p < 0  # Should be negative. Think why!
     return p
@@ -497,7 +510,15 @@ def count_correct(gold_sentence, pred_sentence):
 
     """
     assert len(gold_sentence) == len(pred_sentence)
-
-    # TODO complete the code
+    correct, correctOOV, OOV = 0, 0, 0
+    for gold_w, pred_s in zip(gold_sentence, pred_sentence):
+        is_correct = gold_w[1] == pred_s[1]
+        is_oov = gold_w[0] in perWordTagCounts
+        if is_correct:
+            correct += 1
+        if is_oov:
+            OOV += 1
+        if is_correct and is_oov:
+            correctOOV += 1
 
     return correct, correctOOV, OOV
