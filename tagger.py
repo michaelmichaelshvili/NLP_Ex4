@@ -9,7 +9,9 @@ to predict the part of speech sequence for a given sentence.
 
 import torch
 import torch.nn as nn
+import torchtext as tt
 from torchtext import data
+from torch.utils.data import DataLoader, TensorDataset
 import torch.optim as optim
 import pandas as pd
 from math import log, isfinite
@@ -37,7 +39,6 @@ def who_am_i():  # this is not a class method
     """Returns a dictionary with your name, id number and email. keys=['name', 'id','email']
         Make sure you return your own info!
     """
-    # TODO edit the dictionary to have your own details
     return {'name': 'Michael Michaelshvili', 'id': '318949443', 'email': 'michmich@post.bgu.ac.il'}
 
 
@@ -67,6 +68,7 @@ def load_annotated_corpus(filename):
 START = "<DUMMY_START_TAG>"
 END = "<DUMMY_END_TAG>"
 UNK = "<UNKNOWN>"
+PAD = "<PAD>"
 
 allTagCounts = Counter()
 # use Counters inside these
@@ -350,8 +352,33 @@ def initialize_rnn_model(params_d):
         #to the returned dict
     """
 
-    # TODO complete the code
+    data_fn = params_d['data_fn']
+    sentences = load_annotated_corpus(data_fn)
 
+    counter = Counter(w.lower() for sentence in sentences for w, t in sentence)
+    max_vocab_size = params_d['max_vocab_size']
+    min_frequency = params_d['min_frequency']
+    vocab = []
+    word_frequency_list = counter.most_common(max_vocab_size if max_vocab_size != -1 else None)
+    for word, f in word_frequency_list:
+        if f >= min_frequency:
+            vocab.append(word)
+
+    vectors = load_pretrained_embeddings(params_d['pretrained_embeddings_fn'], vocab)
+    all_tags_from_data = {t for sentence in sentences for w, t in sentence} | {PAD}
+    ttoi, itot = {}, {}
+    for i, t in enumerate(all_tags_from_data):
+        ttoi[t] = i
+        itot[i] = t
+
+    input_rep = params_d['input_rep']
+    embedding_dimension = params_d['embedding_dimension']
+    num_of_layers = params_d['num_of_layers']
+    output_dimension = params_d['output_dimension']
+    lstm = RNN(embedding_dim=embedding_dimension, pretrained_weights=vectors.vectors, input_rep=input_rep,
+               num_of_layers=num_of_layers, output_dimension=output_dimension)
+
+    model = {'lstm': lstm, 'input_rep': input_rep, 'wtoi': vectors.stoi, 'itow': vectors.itos, 'ttoi': ttoi, 'itot': itot}
     return model
 
     # no need for this one as part of the API
@@ -390,8 +417,52 @@ def load_pretrained_embeddings(path, vocab=None):
         vocab (list): a list of words to have embeddings for. Defaults to None.
 
     """
-    # TODO
+
+    class Vector:
+        def __init__(self, itos, stoi, vectors):
+            self.itos = itos
+            self.stoi = stoi
+            self.vectors = vectors
+
+    vectors = tt.vocab.Vectors(path)
+    if vocab is not None:
+        dict = {PAD: 0}
+        dict.update({k: i + 1 for i, k in enumerate(vocab)})
+        vectors = Vector([PAD] + vocab, dict,
+                         torch.cat([torch.Tensor([[0.0] * 100]), vectors.get_vecs_by_tokens(vocab)]))
+    else:
+        dict = {PAD: 0}
+        dict.update({k: v + 1 for k, v in vectors.stoi.items()})
+        vectors = Vector([PAD] + vectors.itos, dict, torch.cat([torch.Tensor([[0.0] * 100]), vectors.vectors]))
     return vectors
+
+
+class RNN(nn.Module):
+    def __init__(self, embedding_dim, pretrained_weights, input_rep,
+                 num_of_layers, output_dimension, hidden_dim=128, dropout=0.25):
+        self.input_rep = input_rep
+        self.embedding = nn.Embedding.from_pretrained(pretrained_weights, freeze=True)
+        self.input_size = embedding_dim + 3 * input_rep
+        self.lstm = nn.LSTM(self.input_size, hidden_dim, num_layers=num_of_layers, dropout=dropout, bidirectional=True)
+        self.fc = nn.Linear(2 * hidden_dim, output_dimension)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, input):
+        emb_idx = input[0]
+        case_features = input[1:]
+        x = self.dropout(self.embedding(emb_idx))
+
+        if self.input_rep == 1:
+            x = torch.cat((x, case_features), dim=2)
+        x, _ = self.lstm(x)
+        x = self.dropout(x)
+        x = self.fc(x)
+        return x
+
+    def fit(self, x_train, y_train, epochs=10, batch_size=128):
+        train_ds = TensorDataset(x_train, y_train)
+        train_dl = DataLoader(train_ds, batch_size=batch_size)
+
 
 
 def train_rnn(model, train_data, val_data=None):
@@ -414,10 +485,12 @@ def train_rnn(model, train_data, val_data=None):
     # 4. some of the above could be implemented in helper functions (not part of
     #    the required API)
 
-    # TODO complete the code
+    model = model['lstm']
+    input_rep = model['input_rep']
+    opt = optim.Adam(model.parameters(), lr=0.001)
 
     criterion = nn.CrossEntropyLoss()  # you can set the parameters as you like
-    vectors = load_pretrained_embeddings(pretrained_embeddings_fn)
+    # vectors = load_pretrained_embeddings(pretrained_embeddings_fn)
 
     model = model.to(device)
     criterion = criterion.to(device)
@@ -522,3 +595,8 @@ def count_correct(gold_sentence, pred_sentence):
             correctOOV += 1
 
     return correct, correctOOV, OOV
+
+
+if __name__ == '__main__':
+    vectors = load_pretrained_embeddings('glove.6B.100d.txt')
+    x = 0
