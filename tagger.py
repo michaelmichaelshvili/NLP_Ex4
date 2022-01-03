@@ -365,20 +365,20 @@ def initialize_rnn_model(params_d):
             vocab.append(word)
 
     vectors = load_pretrained_embeddings(params_d['pretrained_embeddings_fn'], vocab)
-    all_tags_from_data = {t for sentence in sentences for w, t in sentence} | {PAD}
+    max_input_size = max([len(sentence) for sentence in sentences])
+    all_tags_from_data = {t for sentence in sentences for w, t in sentence} | {END}
     ttoi, itot = {}, {}
     for i, t in enumerate(all_tags_from_data):
         ttoi[t] = i
         itot[i] = t
 
     input_rep = params_d['input_rep']
-    embedding_dimension = params_d['embedding_dimension']
-    num_of_layers = params_d['num_of_layers']
-    output_dimension = params_d['output_dimension']
-    lstm = RNN(embedding_dim=embedding_dimension, pretrained_weights=vectors.vectors, input_rep=input_rep,
-               num_of_layers=num_of_layers, output_dimension=output_dimension)
+    lstm = RNN(max_input_size=max_input_size, embedding_dim=params_d['embedding_dimension'],
+               pretrained_weights=vectors.vectors, input_rep=input_rep,
+               num_of_layers=params_d['num_of_layers'], output_dimension=params_d['output_dimension'] + 1)
 
-    model = {'lstm': lstm, 'input_rep': input_rep, 'wtoi': vectors.stoi, 'itow': vectors.itos, 'ttoi': ttoi, 'itot': itot}
+    model = {'lstm': lstm, 'input_rep': input_rep, 'wtoi': vectors.stoi, 'itow': vectors.itos, 'ttoi': ttoi,
+             'itot': itot}
     return model
 
     # no need for this one as part of the API
@@ -400,6 +400,43 @@ def initialize_rnn_model(params_d):
     # TODO complete the code
 
     # return params_d
+
+
+def get_word_feaure(word, wtoi, input_rep):
+    idx = wtoi[PAD] if word == PAD else (wtoi[word.lower()] if word.lower() in wtoi else wtoi[UNK])
+    case = []
+    if input_rep == 1:
+        case = [word.islower(), word.isupper(), word[0].isupper()]
+    return idx, case
+
+
+def get_sentence_features(words, wtoi, input_rep):
+    idxs, cases = [], []
+    for word in words:
+        idx, case = get_word_feaure(word, wtoi, input_rep)
+        idxs.append(idx)
+        cases.append(case)
+    return idxs, cases
+
+
+def get_X_y_from_sentences(sentences, wtoi, ttoi, max_length, input_rep):
+    X_train_idx, x_train_case, y_train = [], [], []
+    for sentence in sentences:
+        tag_idx = []  # y - the value to predict
+        words = []
+        for word, tag in sentence:
+            tag_idx.append(ttoi[tag])
+            words.append(word)
+        words += (max_length - len(words)) * [PAD]
+        tag_idx += (max_length - len(tag_idx)) * [ttoi[END]]
+        y_train.append(tag_idx)
+        idxs, cases = get_sentence_features(words, wtoi, input_rep)
+        X_train_idx.append(idxs)
+        x_train_case.append(cases)
+    X_train_idx = torch.LongTensor(X_train_idx)
+    x_train_case = torch.BoolTensor(x_train_case)
+    y_train = torch.LongTensor(y_train)
+    return X_train_idx, x_train_case, y_train
 
 
 def load_pretrained_embeddings(path, vocab=None):
@@ -426,43 +463,67 @@ def load_pretrained_embeddings(path, vocab=None):
 
     vectors = tt.vocab.Vectors(path)
     if vocab is not None:
-        dict = {PAD: 0}
-        dict.update({k: i + 1 for i, k in enumerate(vocab)})
-        vectors = Vector([PAD] + vocab, dict,
-                         torch.cat([torch.Tensor([[0.0] * 100]), vectors.get_vecs_by_tokens(vocab)]))
+        dict = {PAD: 0, UNK: 1}
+        dict.update({k: i + 2 for i, k in enumerate(vocab)})
+        vectors = Vector([PAD, UNK] + vocab, dict,
+                         torch.cat([torch.Tensor([[0.0] * 100]), torch.Tensor([[0.0] * 100]),
+                                    vectors.get_vecs_by_tokens(vocab)]))
     else:
-        dict = {PAD: 0}
-        dict.update({k: v + 1 for k, v in vectors.stoi.items()})
-        vectors = Vector([PAD] + vectors.itos, dict, torch.cat([torch.Tensor([[0.0] * 100]), vectors.vectors]))
+        dict = {PAD: 0, UNK: 1}
+        dict.update({k: v + 2 for k, v in vectors.stoi.items()})
+        vectors = Vector([PAD, UNK] + vectors.itos, dict,
+                         torch.cat([torch.Tensor([[0.0] * 100]), torch.Tensor([[0.0] * 100]), vectors.vectors]))
     return vectors
 
 
 class RNN(nn.Module):
-    def __init__(self, embedding_dim, pretrained_weights, input_rep,
+    def __init__(self, max_input_size, embedding_dim, pretrained_weights, input_rep,
                  num_of_layers, output_dimension, hidden_dim=128, dropout=0.25):
+        super().__init__()
         self.input_rep = input_rep
+        self.max_input_size = max_input_size
+        self.embedding_dim = embedding_dim
         self.embedding = nn.Embedding.from_pretrained(pretrained_weights, freeze=True)
-        self.input_size = embedding_dim + 3 * input_rep
-        self.lstm = nn.LSTM(self.input_size, hidden_dim, num_layers=num_of_layers, dropout=dropout, bidirectional=True)
+        self.lstm = nn.LSTM(embedding_dim + 3 * input_rep, hidden_dim, num_layers=num_of_layers, dropout=dropout,
+                            bidirectional=True)
         self.fc = nn.Linear(2 * hidden_dim, output_dimension)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, input):
         emb_idx = input[0]
-        case_features = input[1:]
+        case_features = input[1]
         x = self.dropout(self.embedding(emb_idx))
-
         if self.input_rep == 1:
             x = torch.cat((x, case_features), dim=2)
-        x, _ = self.lstm(x)
-        x = self.dropout(x)
-        x = self.fc(x)
+        x, (h, c) = self.lstm(x)
+        x = self.fc(self.dropout(x))
         return x
 
-    def fit(self, x_train, y_train, epochs=10, batch_size=128):
-        train_ds = TensorDataset(x_train, y_train)
+    def fit(self, x_train, y_train, opt, criterion, x_val=None, y_val=None, epochs=20, batch_size=128):
+        train_ds = TensorDataset(x_train[0], x_train[1], y_train)
         train_dl = DataLoader(train_ds, batch_size=batch_size)
+        best_loss = None
+        for epoch in range(epochs):
+            self.train()
+            for xb1, xb2, yb in train_dl:
+                opt.zero_grad()
+                y_pred = self([xb1.to(device), xb2.to(device)])
+                y_pred = y_pred.reshape(-1, y_pred.shape[-1])
+                yb = yb.reshape(-1)
+                loss = criterion(y_pred, yb.to(device))
+                loss.backward()
+                opt.step()
+            if x_val:
+                self.eval()
+                y_pred = self([x_val[0].to(device), x_val[1].to(device)])
+                y_pred = y_pred.reshape(-1, y_pred.shape[-1])
+                y_val = y_val.reshape(-1).to(device)
+                valid_loss = criterion(y_pred, y_val)
+                if best_loss is None or valid_loss < best_loss:
+                    best_loss = valid_loss
+                    torch.save(self.state_dict(), f'best_model_rep_{self.input_rep}.pt')
 
+                print(f'epoch: {epoch}\t loss: {valid_loss}')
 
 
 def train_rnn(model, train_data, val_data=None):
@@ -484,16 +545,27 @@ def train_rnn(model, train_data, val_data=None):
     # 3. consider using batching
     # 4. some of the above could be implemented in helper functions (not part of
     #    the required API)
-
-    model = model['lstm']
-    input_rep = model['input_rep']
+    model, input_rep, wtoi, itow, ttoi, itot = model.values()
     opt = optim.Adam(model.parameters(), lr=0.001)
 
     criterion = nn.CrossEntropyLoss()  # you can set the parameters as you like
-    # vectors = load_pretrained_embeddings(pretrained_embeddings_fn)
 
     model = model.to(device)
     criterion = criterion.to(device)
+
+    x_train_idx, x_train_case, y_train = get_X_y_from_sentences(train_data, wtoi, ttoi, model.max_input_size, input_rep)
+    if val_data:
+        X_val_idx, x_val_case, y_val = get_X_y_from_sentences(val_data, wtoi, ttoi, model.max_input_size, input_rep)
+    else:
+        idxs = np.arange(len(x_train_idx))
+        np.random.shuffle(idxs)
+        train_idx, val_idx = idxs[int(0.2 * len(idxs)):], idxs[:int(0.2 * len(idxs))]
+
+        X_val_idx, x_val_case, y_val = x_train_idx[val_idx], x_train_case[val_idx], torch.LongTensor(y_train[val_idx])
+        x_train_idx, x_train_case, y_train = x_train_idx[train_idx], x_train_case[train_idx], torch.LongTensor(
+            y_train[train_idx])
+    model.fit([x_train_idx, x_train_case], y_train, opt, criterion, x_val=[X_val_idx, x_val_case], y_val=y_val)
+    model.load_state_dict(torch.load(f'best_model_rep_{input_rep}.pt'))
 
 
 def rnn_tag_sentence(sentence, model):
@@ -508,9 +580,15 @@ def rnn_tag_sentence(sentence, model):
     Return:
         list: list of pairs
     """
-
-    # TODO complete the code
-
+    model, input_rep, wtoi, itow, ttoi, itot = model.values()
+    pad_sentence = sentence + (model.max_input_size - len(sentence)) * [PAD]
+    idxs, cases = get_sentence_features(pad_sentence, wtoi, input_rep)
+    idxs, cases = torch.LongTensor(idxs).reshape(1, -1).to(device), torch.BoolTensor(cases).reshape(1, -1, 3).to(device)
+    pred = model([idxs, cases])
+    indices = torch.argmax(pred[:len(sentence)], dim=-1)[0]
+    indices = [int(i) for i in indices]
+    tags = [itot[idx] if idx in itot else UNK for idx in indices]
+    tagged_sentence = list(zip(sentence, tags))
     return tagged_sentence
 
 
@@ -521,9 +599,16 @@ def get_best_performing_model_params():
         a model and train a model by calling
                initialize_rnn_model() and train_lstm()
     """
-    # TODO complete the code
 
-    return model_params
+    return {'max_vocab_size': -1,
+            'min_frequency': 2,
+            'input_rep': 1,
+            'embedding_dimension': 100,
+            'num_of_layers': 3,
+            'output_dimension': 17,
+            'pretrained_embeddings_fn': 'glove.6B.100d.txt',
+            'data_fn': 'en-ud-train.upos.tsv'
+            }
 
 
 # ===========================================================
@@ -563,13 +648,13 @@ def tag_sentence(sentence, model):
         list: list of pairs
     """
     if list(model.keys())[0] == 'baseline':
-        return baseline_tag_sentence(sentence, model.values()[0], model.values()[1])
+        return baseline_tag_sentence(sentence, model['baseline'][0], model['baseline'][1])
     if list(model.keys())[0] == 'hmm':
-        return hmm_tag_sentence(sentence, model.values()[0], model.values()[1])
+        return hmm_tag_sentence(sentence, model['hmm'][0], model['hmm'][1])
     if list(model.keys())[0] == 'blstm':
-        return rnn_tag_sentence(sentence, model.values()[0])
+        return rnn_tag_sentence(sentence, model['blstm'][0])
     if list(model.keys())[0] == 'cblstm':
-        return rnn_tag_sentence(sentence, model.values()[0])
+        return rnn_tag_sentence(sentence, model['cblstm'][0])
 
 
 def count_correct(gold_sentence, pred_sentence):
