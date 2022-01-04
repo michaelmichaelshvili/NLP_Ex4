@@ -82,6 +82,13 @@ B = {}  # emmissions probabilities
 
 
 def fill_count_dict(dict, k1, k2):
+    """
+    Increase by 1 existing key, else initiates new Counter
+    :param dict: dict to increase/create key in it
+    :param k1: key in dict
+    :param k2: key in the Counter in dict[key1]
+    :return:
+    """
     if k1 not in dict:
         dict[k1] = Counter({k2: 1})
     else:
@@ -89,6 +96,11 @@ def fill_count_dict(dict, k1, k2):
 
 
 def get_distribution_probabilities(from_dict):
+    """
+    Use to create A, B matrix. convert count to transition/emission probabilities
+    :param from_dict: (dict). {k1: {k2: count, ...}, ...}. dict like matrix that we build the matrix from
+    :return: matrix of log probability between to keys
+    """
     probs = {}
     for k1 in from_dict:
         sum_sounts = sum(from_dict[k1].values())
@@ -159,7 +171,7 @@ def baseline_tag_sentence(sentence, perWordTagCounts, allTagCounts):
         if word in perWordTagCounts:
             tagged_sentence.append((word, perWordTagCounts[word].most_common(1)[0][0]))
         else:
-            sampled_tag = random.choices(list(allTagCounts.keys()), weights=list(allTagCounts.values()), k=1)
+            sampled_tag = random.choices(list(allTagCounts.keys()), weights=list(allTagCounts.values()), k=1)[0]
             tagged_sentence.append((word, sampled_tag))
     return tagged_sentence
 
@@ -352,21 +364,24 @@ def initialize_rnn_model(params_d):
         #to the returned dict
     """
 
-    data_fn = params_d['data_fn']
-    sentences = load_annotated_corpus(data_fn)
+    sentences = load_annotated_corpus(params_d['data_fn'])
 
     counter = Counter(w.lower() for sentence in sentences for w, t in sentence)
-    max_vocab_size = params_d['max_vocab_size']
+    max_vocab_size = params_d['max_vocab_size'] if params_d['max_vocab_size'] != -1 else None
     min_frequency = params_d['min_frequency']
     vocab = []
-    word_frequency_list = counter.most_common(max_vocab_size if max_vocab_size != -1 else None)
+
+    # keep only the most frequent words
+    word_frequency_list = counter.most_common(
+        max_vocab_size)  # if max_vocab_size is None, word_frequency_list will contain all words
     for word, f in word_frequency_list:
         if f >= min_frequency:
             vocab.append(word)
 
     vectors = load_pretrained_embeddings(params_d['pretrained_embeddings_fn'], vocab)
     max_input_size = max([len(sentence) for sentence in sentences])
-    all_tags_from_data = {t for sentence in sentences for w, t in sentence} | {END}
+    all_tags_from_data = set([t for sentence in sentences for w, t in sentence]) | {
+        END}  # END is used to be the appropriate tag to PAD word
     ttoi, itot = {}, {}
     for i, t in enumerate(all_tags_from_data):
         ttoi[t] = i
@@ -402,24 +417,32 @@ def initialize_rnn_model(params_d):
     # return params_d
 
 
-def get_word_feaure(word, wtoi, input_rep):
-    idx = wtoi[PAD] if word == PAD else (wtoi[word.lower()] if word.lower() in wtoi else wtoi[UNK])
-    case = []
-    if input_rep == 1:
-        case = [word.islower(), word.isupper(), word[0].isupper()]
-    return idx, case
-
-
 def get_sentence_features(words, wtoi, input_rep):
+    """
+    :param words: (list) words in the sentence
+    :param wtoi: (dict) mapping word to index
+    :param input_rep: (int) 0|1
+    :return: the indices of the words in the embedding layer and case features of the words
+    """
     idxs, cases = [], []
     for word in words:
-        idx, case = get_word_feaure(word, wtoi, input_rep)
+        idx = wtoi[PAD] if word == PAD else (wtoi[word.lower()] if word.lower() in wtoi else wtoi[UNK])
+        case = [] if input_rep == 0 else [word.islower(), word.isupper(), word[0].isupper()]
         idxs.append(idx)
         cases.append(case)
     return idxs, cases
 
 
 def get_X_y_from_sentences(sentences, wtoi, ttoi, max_length, input_rep):
+    """
+    Create the input (x,y) for the RNN model
+    :param sentences: (list): a list of annotated sentences in the format returned by load_annotated_corpus()
+    :param wtoi: (dict) mapping word to index
+    :param ttoi: (dict) mapping tag to index
+    :param max_length: the length of the input in the model
+    :param input_rep: (int) 0|1
+    :return: X: (indices off words, case features of words), y: indices of relevant tags
+    """
     X_train_idx, x_train_case, y_train = [], [], []
     for sentence in sentences:
         tag_idx = []  # y - the value to predict
@@ -427,15 +450,15 @@ def get_X_y_from_sentences(sentences, wtoi, ttoi, max_length, input_rep):
         for word, tag in sentence:
             tag_idx.append(ttoi[tag])
             words.append(word)
-        words += (max_length - len(words)) * [PAD]
-        tag_idx += (max_length - len(tag_idx)) * [ttoi[END]]
+        words += (max_length - len(words)) * [PAD]  # pad the sentence to the correct length
+        tag_idx += (max_length - len(tag_idx)) * [ttoi[END]]  # pad the tags to the correct length
         y_train.append(tag_idx)
         idxs, cases = get_sentence_features(words, wtoi, input_rep)
         X_train_idx.append(idxs)
         x_train_case.append(cases)
-    X_train_idx = torch.LongTensor(X_train_idx)
-    x_train_case = torch.BoolTensor(x_train_case)
-    y_train = torch.LongTensor(y_train)
+    X_train_idx = torch.tensor(X_train_idx, dtype=torch.long)
+    x_train_case = torch.tensor(x_train_case, dtype=torch.bool)
+    y_train = torch.tensor(y_train, dtype=torch.long)
     return X_train_idx, x_train_case, y_train
 
 
@@ -456,20 +479,24 @@ def load_pretrained_embeddings(path, vocab=None):
     """
 
     class Vector:
+        """
+        Class that contains the needed data for the rest of training process
+        """
+
         def __init__(self, itos, stoi, vectors):
-            self.itos = itos
-            self.stoi = stoi
-            self.vectors = vectors
+            self.itos = itos  # dict mapping from word to index
+            self.stoi = stoi  # dict mapping from index to word
+            self.vectors = vectors  # the embedding vector of words
 
     vectors = tt.vocab.Vectors(path)
     if vocab is not None:
-        dict = {PAD: 0, UNK: 1}
+        dict = {PAD: 0, UNK: 1}  # add PAD and UNK to dict to use them later
         dict.update({k: i + 2 for i, k in enumerate(vocab)})
         vectors = Vector([PAD, UNK] + vocab, dict,
                          torch.cat([torch.Tensor([[0.0] * 100]), torch.Tensor([[0.0] * 100]),
                                     vectors.get_vecs_by_tokens(vocab)]))
     else:
-        dict = {PAD: 0, UNK: 1}
+        dict = {PAD: 0, UNK: 1}  # add PAD and UNK to dict to use them later
         dict.update({k: v + 2 for k, v in vectors.stoi.items()})
         vectors = Vector([PAD, UNK] + vectors.itos, dict,
                          torch.cat([torch.Tensor([[0.0] * 100]), torch.Tensor([[0.0] * 100]), vectors.vectors]))
@@ -477,13 +504,18 @@ def load_pretrained_embeddings(path, vocab=None):
 
 
 class RNN(nn.Module):
+    """
+    The architecture of th model used in this task
+    """
+
     def __init__(self, max_input_size, embedding_dim, pretrained_weights, input_rep,
                  num_of_layers, output_dimension, hidden_dim=128, dropout=0.25):
         super().__init__()
         self.input_rep = input_rep
         self.max_input_size = max_input_size
         self.embedding_dim = embedding_dim
-        self.embedding = nn.Embedding.from_pretrained(pretrained_weights, freeze=True)
+        self.embedding = nn.Embedding.from_pretrained(pretrained_weights,
+                                                      freeze=True)  # freeze because the weights are pretrained
         self.lstm = nn.LSTM(embedding_dim + 3 * input_rep, hidden_dim, num_layers=num_of_layers, dropout=dropout,
                             bidirectional=True)
         self.fc = nn.Linear(2 * hidden_dim, output_dimension)
@@ -499,7 +531,7 @@ class RNN(nn.Module):
         x = self.fc(self.dropout(x))
         return x
 
-    def fit(self, x_train, y_train, opt, criterion, x_val=None, y_val=None, epochs=20, batch_size=128):
+    def fit(self, x_train, y_train, opt, criterion, x_val=None, y_val=None, epochs=50, batch_size=128):
         train_ds = TensorDataset(x_train[0], x_train[1], y_train)
         train_dl = DataLoader(train_ds, batch_size=batch_size)
         best_loss = None
@@ -556,16 +588,17 @@ def train_rnn(model, train_data, val_data=None):
     x_train_idx, x_train_case, y_train = get_X_y_from_sentences(train_data, wtoi, ttoi, model.max_input_size, input_rep)
     if val_data:
         X_val_idx, x_val_case, y_val = get_X_y_from_sentences(val_data, wtoi, ttoi, model.max_input_size, input_rep)
-    else:
+    else:  # the choice of best model is according the validation data, if there is no validation, I create validation with 80% from the train data.
         idxs = np.arange(len(x_train_idx))
         np.random.shuffle(idxs)
         train_idx, val_idx = idxs[int(0.2 * len(idxs)):], idxs[:int(0.2 * len(idxs))]
 
-        X_val_idx, x_val_case, y_val = x_train_idx[val_idx], x_train_case[val_idx], torch.LongTensor(y_train[val_idx])
-        x_train_idx, x_train_case, y_train = x_train_idx[train_idx], x_train_case[train_idx], torch.LongTensor(
-            y_train[train_idx])
+        X_val_idx, x_val_case, y_val = x_train_idx[val_idx], x_train_case[val_idx], torch.tensor(y_train[val_idx],
+                                                                                                 dtype=torch.long)
+        x_train_idx, x_train_case, y_train = x_train_idx[train_idx], x_train_case[train_idx], torch.tensor(
+            y_train[train_idx], dtype=torch.long)
     model.fit([x_train_idx, x_train_case], y_train, opt, criterion, x_val=[X_val_idx, x_val_case], y_val=y_val)
-    model.load_state_dict(torch.load(f'best_model_rep_{input_rep}.pt'))
+    model.load_state_dict(torch.load(f'best_model_rep_{input_rep}.pt'))  # load the best model parameters
 
 
 def rnn_tag_sentence(sentence, model):
@@ -581,9 +614,10 @@ def rnn_tag_sentence(sentence, model):
         list: list of pairs
     """
     model, input_rep, wtoi, itow, ttoi, itot = model.values()
-    pad_sentence = sentence + (model.max_input_size - len(sentence)) * [PAD]
+    pad_sentence = sentence + (model.max_input_size - len(sentence)) * [PAD]  # pad the sentence to correct length
     idxs, cases = get_sentence_features(pad_sentence, wtoi, input_rep)
-    idxs, cases = torch.LongTensor(idxs).reshape(1, -1).to(device), torch.BoolTensor(cases).reshape(1, -1, 3).to(device)
+    idxs, cases = torch.tensor(idxs, dtype=torch.long).reshape(1, -1).to(device), \
+                  torch.tensor(cases, dtype=torch.bool).reshape(1, -1, 3).to(device)
     pred = model([idxs, cases])
     indices = torch.argmax(pred[:len(sentence)], dim=-1)[0]
     indices = [int(i) for i in indices]
@@ -604,7 +638,7 @@ def get_best_performing_model_params():
             'min_frequency': 2,
             'input_rep': 1,
             'embedding_dimension': 100,
-            'num_of_layers': 3,
+            'num_of_layers': 4,
             'output_dimension': 17,
             'pretrained_embeddings_fn': 'glove.6B.100d.txt',
             'data_fn': 'en-ud-train.upos.tsv'
@@ -680,8 +714,3 @@ def count_correct(gold_sentence, pred_sentence):
             correctOOV += 1
 
     return correct, correctOOV, OOV
-
-
-if __name__ == '__main__':
-    vectors = load_pretrained_embeddings('glove.6B.100d.txt')
-    x = 0
