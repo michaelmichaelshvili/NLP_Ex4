@@ -705,7 +705,7 @@ def count_correct(gold_sentence, pred_sentence):
     correct, correctOOV, OOV = 0, 0, 0
     for gold_w, pred_s in zip(gold_sentence, pred_sentence):
         is_correct = gold_w[1] == pred_s[1]
-        is_oov = gold_w[0] in perWordTagCounts
+        is_oov = gold_w[0] not in perWordTagCounts
         if is_correct:
             correct += 1
         if is_oov:
