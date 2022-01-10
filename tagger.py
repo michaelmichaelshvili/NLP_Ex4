@@ -30,7 +30,10 @@ def use_seed(seed=2512021):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.set_deterministic(True)
+    try:
+        torch.set_deterministic(True)
+    except:
+        pass
     # torch.backends.cudnn.deterministic = True
 
 
@@ -129,19 +132,19 @@ def learn_params(tagged_sentences):
         prev_state = START
         for word, tag in sen:
             allTagCounts[tag] += 1
-            fill_count_dict(perWordTagCounts, word, tag)
+            fill_count_dict(perWordTagCounts, word.lower(), tag)
             fill_count_dict(transitionCounts, prev_state, tag)
-            fill_count_dict(emissionCounts, tag, word)
+            fill_count_dict(emissionCounts, tag, word.lower())
             prev_state = tag
         fill_count_dict(transitionCounts, prev_state, END)
 
     # smoothing
-    for key1 in transitionCounts.keys():
+    for key1 in transitionCounts:
         c = transitionCounts[key1]
         for key2 in list(allTagCounts.keys()) + [END]:
             c[key2] += 1
     del transitionCounts[START][END]
-    for key1 in emissionCounts.keys():
+    for key1 in emissionCounts:
         c = emissionCounts[key1]
         for key2 in list(perWordTagCounts.keys()) + [UNK]:
             c[key2] += 1
@@ -168,8 +171,8 @@ def baseline_tag_sentence(sentence, perWordTagCounts, allTagCounts):
     """
     tagged_sentence = []
     for word in sentence:
-        if word in perWordTagCounts:
-            tagged_sentence.append((word, perWordTagCounts[word].most_common(1)[0][0]))
+        if word.lower() in perWordTagCounts:
+            tagged_sentence.append((word, perWordTagCounts[word.lower()].most_common(1)[0][0]))
         else:
             sampled_tag = random.choices(list(allTagCounts.keys()), weights=list(allTagCounts.values()), k=1)[0]
             tagged_sentence.append((word, sampled_tag))
@@ -225,26 +228,25 @@ def viterbi(sentence, A, B):
     # Hint 2: start with a dummy item  with the START tag (what would it log-prob be?).
     #         current list = [ the dummy item ]
     # Hint 3: end the sequence with a dummy: the highest-scoring item with the tag END
-    sentence.insert(0, START)
     viterbi = pd.DataFrame(0, index=list(allTagCounts.keys()), columns=[i for i in range(len(sentence))])
-    for t in A[START]:
-        viterbi.loc[t, 0] = A[START][t] + (B[t][sentence[0]] if sentence[0] in perWordTagCounts else B[t][UNK])
 
-    for w in range(1, len(sentence)):  # loop through observations (words)
-        tags_to_iterate = list(perWordTagCounts[sentence[w]].keys()) if sentence[w] in perWordTagCounts else list(
-            allTagCounts.keys())
+    v_last = (START, None, viterbi.iloc[:, 0][viterbi.iloc[:, 0] < 0].max())
+
+    for w in range(0, len(sentence)):  # loop through observations (words)
+
+        tags_to_iterate = list(perWordTagCounts[sentence[w].lower()].keys()) if \
+            sentence[w].lower() in perWordTagCounts else list(allTagCounts.keys())
         for t in tags_to_iterate:  # loop through the tags
-            best_tag, best_prob = predict_next_best(sentence, w, t, viterbi, A, B)
-            viterbi.loc[t, w] = best_prob
-    v_last = {'tag': END, 'p': None}
-    curr_v = v_last
-    for i in range(len(sentence) - 1, -1, -1):
-        if i == 0:  # START
-            curr_v['p'] = {'tag': START, 'p': None}
-        else:
-            curr_v['p'] = {'tag': viterbi.iloc[:, i][viterbi.iloc[:, i] < 0].idxmax(), 'p': None}
-            curr_v = curr_v['p']
-    sentence.pop(0)
+            if w == 0:
+                viterbi.loc[t, w] = A[START][t] + (
+                    B[t][sentence[w].lower()] if sentence[w].lower() in perWordTagCounts else B[t][UNK])
+            else:
+                best_tag, best_prob = predict_next_best(sentence, w, t, viterbi, A, B)
+                viterbi.loc[t, w] = best_prob
+        v_last = (
+            viterbi.iloc[:, w][viterbi.iloc[:, w] < 0].idxmax(), v_last,
+            viterbi.iloc[:, w][viterbi.iloc[:, w] < 0].max())
+    v_last = (END, v_last, viterbi.iloc[:, -1][viterbi.iloc[:, -1] < 0].max())
     return v_last
 
 
@@ -255,10 +257,10 @@ def retrace(end_item):
         list of words in the sentence (same indices).
     """
     tags = []
-    item = end_item['p']
-    while item['p']:
-        tags.append(item['tag'])
-        item = item['p']
+    item = end_item[1]
+    while item[1]:
+        tags.append(item[0])
+        item = item[1]
     return reversed(tags)
 
 
@@ -267,10 +269,10 @@ def predict_next_best(sentence, word_idx, tag, viterbi, A, B):
     """Returns a new item (tupple)
     """
     best_tag, best_prob = None, float('-inf')
-
-    for s in allTagCounts:
+    previous_tags = list(viterbi.iloc[:, word_idx - 1][viterbi.iloc[:, word_idx - 1] < 0].index)
+    for s in previous_tags:
         prob = viterbi.at[s, word_idx - 1] + A[s][tag] + (
-            B[tag][sentence[word_idx]] if sentence[word_idx] in B[tag] else B[tag][UNK])
+            B[tag][sentence[word_idx].lower()] if sentence[word_idx].lower() in B[tag] else B[tag][UNK])
         if prob > best_prob:
             best_prob = prob
             best_tag = s
@@ -290,7 +292,7 @@ def joint_prob(sentence, A, B):
 
     prev_tag = START
     for word, tag in sentence:
-        p += A[prev_tag][tag] + (B[tag][word] if word in B[tag] else B[tag][UNK])
+        p += A[prev_tag][tag] + (B[tag][word.lower()] if word.lower() in B[tag] else B[tag][UNK])
         prev_tag = tag
 
     p += A[prev_tag][END]
@@ -531,7 +533,7 @@ class RNN(nn.Module):
         x = self.fc(self.dropout(x))
         return x
 
-    def fit(self, x_train, y_train, opt, criterion, x_val=None, y_val=None, epochs=50, batch_size=128):
+    def fit(self, x_train, y_train, opt, criterion, x_val=None, y_val=None, epochs=30, batch_size=64):
         train_ds = TensorDataset(x_train[0], x_train[1], y_train)
         train_dl = DataLoader(train_ds, batch_size=batch_size)
         best_loss = None
@@ -554,8 +556,6 @@ class RNN(nn.Module):
                 if best_loss is None or valid_loss < best_loss:
                     best_loss = valid_loss
                     torch.save(self.state_dict(), f'best_model_rep_{self.input_rep}.pt')
-
-                print(f'epoch: {epoch}\t loss: {valid_loss}')
 
 
 def train_rnn(model, train_data, val_data=None):
@@ -618,6 +618,7 @@ def rnn_tag_sentence(sentence, model):
     idxs, cases = get_sentence_features(pad_sentence, wtoi, input_rep)
     idxs, cases = torch.tensor(idxs, dtype=torch.long).reshape(1, -1).to(device), \
                   torch.tensor(cases, dtype=torch.bool).reshape(1, -1, 3).to(device)
+    model.eval()
     pred = model([idxs, cases])
     indices = torch.argmax(pred[:len(sentence)], dim=-1)[0]
     indices = [int(i) for i in indices]
@@ -705,7 +706,7 @@ def count_correct(gold_sentence, pred_sentence):
     correct, correctOOV, OOV = 0, 0, 0
     for gold_w, pred_s in zip(gold_sentence, pred_sentence):
         is_correct = gold_w[1] == pred_s[1]
-        is_oov = gold_w[0] not in perWordTagCounts
+        is_oov = gold_w[0].lower() not in perWordTagCounts
         if is_correct:
             correct += 1
         if is_oov:
